@@ -1,83 +1,102 @@
+import re
 from dotenv import load_dotenv
 
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_openai import OpenAIEmbeddings
+from langchain_qdrant import QdrantVectorStore
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance
-from langchain_community.vectorstores import Qdrant
-
+from qdrant_client.models import Distance, VectorParams
 
 load_dotenv()
 
-myclient = ChatOpenAI()
+COLLECTION_NAME = "youtube_test_collection"
 
 
-COLLECTION_NAME = "youtube_transcript"
+def extract_video_id(url: str):
+
+    match = re.search(r"v=([^&]+)", url)
+
+    if match:
+        return match.group(1)
+
+    raise ValueError("Invalid YouTube URL")
 
 
-def get_video_id(url: str):
-    return url.split("v=")[1].split("&")[0]
-    
+def fetch_transcript(video_id):
 
+    youtube_transcript = YouTubeTranscriptApi()
+    try:
+        transcript = youtube_transcript.fetch(video_id)
 
-def fetch_transcript(url):
+    except Exception:
 
-    video_id = get_video_id(url)
-    print(video_id)
-    ytt = YouTubeTranscriptApi()
-    transcript = ytt.fetch(video_id)
+        transcript_list = youtube_transcript.list(video_id)
 
-    
+        transcript = transcript_list.find_generated_transcript(['en']).fetch()
 
-    text = " ".join([t["text"] for t in transcript])
+    text = " ".join([t.text for t in transcript])
 
     return text
 
+
 def ingest_video(url):
 
-    print("Loading transcript...")
+    video_id = extract_video_id(url)
 
-    transcript = fetch_transcript(url)
+    print("\nFetching transcript...")
+
+    transcript = fetch_transcript(video_id)
+
+    print("Transcript length:", len(transcript))
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200
     )
 
-    docs = splitter.create_documents([transcript])
+    docs = splitter.create_documents(
+        [transcript],
+        metadatas=[{"video_id": video_id, "source_url": url}] 
+    )
 
-    print(f"Chunks created: {len(docs)}")
+    print("Chunks created:", len(docs))
 
     embeddings = OpenAIEmbeddings()
 
-    client = QdrantClient(":memory:")
+    client = QdrantClient("localhost", port=6333)
 
-    client.recreate_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(
-            size=1536,
-            distance=Distance.COSINE
+    existing = [c.name for c in client.get_collections().collections]
+
+    if COLLECTION_NAME not in existing:
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
         )
-    )
+        print("Collection created.")
 
-    vectordb = Qdrant(
+    vectordb = QdrantVectorStore(
         client=client,
         collection_name=COLLECTION_NAME,
-        embeddings=embeddings
+        embedding=embeddings
     )
 
     vectordb.add_documents(docs)
 
-    print("Embeddings stored in Qdrant")
+    print("\nEmbeddings stored in Qdrant")
 
-    return vectordb
 
 
 if __name__ == "__main__":
 
-    url = input("Enter YouTube URL: ")
+    while True:
 
-    ingest_video(url)
+        url = input("\nEnter a youtube url (or type 'exit'): ")
+
+        if url.strip().lower() in ["exit", "quit", "bye"]:
+            print("Goodbye !")
+            break
+
+        ingest_video(url)
